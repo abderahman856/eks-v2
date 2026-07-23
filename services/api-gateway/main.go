@@ -66,7 +66,7 @@ func main() {
 	port := getEnv("PORT", "8080")
 	server := &http.Server{
 		Addr:         ":" + port,
-		Handler:      mux,
+		Handler:      withCORS(mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -228,7 +228,7 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func isPublicPath(path string) bool {
-	public := []string{"/healthz", "/auth/", "/api/shipping/webhook"}
+	public := []string{"/healthz", "/auth/", "/api/shipping/webhook", "/api/shipping/track/"}
 	for _, p := range public {
 		if strings.HasPrefix(path, p) {
 			return true
@@ -272,6 +272,21 @@ func httpError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func getEnv(key, fallback string) string {

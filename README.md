@@ -146,3 +146,105 @@ Everything else is on you. Good luck.
 ## Found a bug?
 
 The services have rough edges (see the audit notes in the team review channel). If you spot a real bug, open a PR against this repo. Include screenshots of the bug reproducing, your fix, and the same scenario working after the fix. The CoderCo team will review it. Good fixes stand out at grading time.
+
+
+
+
+
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: localdev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: sqs
+      DEFAULT_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh
+
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: local-dev-secret
+      ORDER_SERVICE_URL: http://order-service:8081
+      INVENTORY_SERVICE_URL: http://inventory-service:8082
+      PAYMENT_SERVICE_URL: http://payment-service:8083
+      NOTIFICATION_SERVICE_URL: http://notification-service:8084
+      SHIPPING_SERVICE_URL: http://shipping-service:8085
+      DASHBOARD_SERVICE_URL: http://dashboard-api:8086
+    depends_on:
+      - redis
+
+  order-service:
+    build: ./services/order-service
+    ports:
+      - "8081:8081"
+    environment:
+      DATABASE_URL: postgres://app:localdev@postgres:5432/orders?sslmode=disable
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/order-events
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      - postgres
+      - localstack
+
+  inventory-service:
+    build: ./services/inventory-service
+    ports:
+      - "8082:8082"
+    environment:
+      DATABASE_URL: postgres://app:localdev@postgres:5432/orders?sslmode=disable
+    depends_on:
+      - postgres
+
+  
+
+  notification-service:
+    build: ./services/notification-service
+    ports:
+      - "8084:8084"
+    environment:
+      DATABASE_URL: postgres://app:localdev@postgres:5432/orders?sslmode=disable
+    depends_on:
+      - postgres
+
+  
+
+  
+
+  
+
+  dashboard-api:
+    build: ./services/dashboard-api
+    ports:
+      - "8086:8086"
+    environment:
+      DATABASE_URL: postgres://app:localdev@postgres:5432/orders?sslmode=disable
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:
