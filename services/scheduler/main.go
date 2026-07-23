@@ -18,44 +18,46 @@ var db *sql.DB
 
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		log.Fatal("DATABASE_URL is required")
-	}
+	if dbURL != "" {
+		var err error
+		db, err = sql.Open("postgres", dbURL)
+		if err != nil {
+			log.Fatalf("Failed to connect to database: %v", err)
+		}
+		defer db.Close()
 
-	var err error
-	db, err = sql.Open("postgres", dbURL)
-	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		db.SetMaxOpenConns(5)
+		db.SetMaxIdleConns(2)
+		db.SetConnMaxLifetime(5 * time.Minute)
+		waitForDB()
+	} else {
+		log.Println("Scheduler starting without direct DB connection")
 	}
-	defer db.Close()
-
-	db.SetMaxOpenConns(5)
-	db.SetMaxIdleConns(2)
-	db.SetConnMaxLifetime(5 * time.Minute)
-	waitForDB()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Health check
+	// Health check server
 	go func() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			status := "ok"
-			if err := db.Ping(); err != nil {
-				status = "unhealthy"
-				w.WriteHeader(http.StatusServiceUnavailable)
+			if db != nil {
+				if err := db.Ping(); err != nil {
+					status = "unhealthy"
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": status, "service": "scheduler"})
 		})
-		port := getEnv("HEALTH_PORT", "8091")
+		port := getEnv("HEALTH_PORT", "8086")
 		log.Printf("Scheduler health check on :%s", port)
 		http.ListenAndServe(":"+port, mux)
 	}()
 
-	// Graceful shutdown
+	// Graceful shutdown listener
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -82,7 +84,6 @@ func runEvery(ctx context.Context, interval time.Duration, name string, fn func(
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Run immediately on start
 	log.Printf("Running job: %s", name)
 	fn()
 
@@ -99,13 +100,16 @@ func runEvery(ctx context.Context, interval time.Duration, name string, fn func(
 	}
 }
 
-// expireReservations releases inventory reservations that have expired
 func expireReservations() {
-	// Find expired reservations and release them
+	if db == nil {
+		log.Println("expire_reservations skipped (no DB connection)")
+		return
+	}
+
 	rows, err := db.Query(
 		`SELECT r.order_id, r.product_id, r.quantity
-		 FROM reservations r
-		 WHERE r.status = 'active' AND r.expires_at < NOW()`,
+         FROM reservations r
+         WHERE r.status = 'active' AND r.expires_at < NOW()`,
 	)
 	if err != nil {
 		log.Printf("expire_reservations query error: %v", err)
@@ -138,13 +142,17 @@ func expireReservations() {
 	}
 }
 
-// detectAbandonedOrders finds orders stuck in pending for too long
 func detectAbandonedOrders() {
+	if db == nil {
+		log.Println("abandoned_carts skipped (no DB connection)")
+		return
+	}
+
 	cutoff := time.Now().Add(-30 * time.Minute)
 
 	rows, err := db.Query(
 		`SELECT id, customer_id FROM orders
-		 WHERE status = 'pending' AND created_at < $1`,
+         WHERE status = 'pending' AND created_at < $1`,
 		cutoff,
 	)
 	if err != nil {
@@ -159,10 +167,7 @@ func detectAbandonedOrders() {
 		var customerID string
 		rows.Scan(&orderID, &customerID)
 
-		// Cancel the order
 		db.Exec("UPDATE orders SET status = 'cancelled', updated_at = NOW() WHERE id = $1", orderID)
-
-		// Publish cancellation event (would trigger inventory release via worker)
 		log.Printf("Cancelled abandoned order #%d (customer: %s)", orderID, customerID)
 		count++
 	}
@@ -172,26 +177,32 @@ func detectAbandonedOrders() {
 	}
 }
 
-// retryFailedPayments attempts to re-process failed payments
 func retryFailedPayments() {
+	if db == nil {
+		log.Println("retry_failed_payments skipped (no DB connection)")
+		return
+	}
+
 	cutoff := time.Now().Add(-1 * time.Hour)
 
 	var count int
 	db.QueryRow(
 		`SELECT COUNT(*) FROM payments
-		 WHERE status = 'failed' AND created_at > $1`,
+         WHERE status = 'failed' AND created_at > $1`,
 		cutoff,
 	).Scan(&count)
 
 	if count > 0 {
 		log.Printf("Found %d failed payments eligible for retry", count)
-		// In production: re-queue payment attempts via SQS
-		// POST to payment-service/charge for each
 	}
 }
 
-// generateDigest creates summary stats
 func generateDigest() {
+	if db == nil {
+		log.Println("generateDigest skipped (no DB connection)")
+		return
+	}
+
 	var totalOrders, pendingOrders, completedOrders int
 	var totalRevenue float64
 
@@ -204,13 +215,15 @@ func generateDigest() {
 
 	log.Printf("Daily digest - Orders today: %d, Pending: %d, Completed: %d, Revenue: %.2f",
 		totalOrders, pendingOrders, completedOrders, totalRevenue)
-
-	// In production: send digest via notification-service
 }
 
-// cleanupOldEvents removes old tracking/audit data
 func cleanupOldEvents() {
-	cutoff := time.Now().AddDate(0, 0, -90) // 90 days retention
+	if db == nil {
+		log.Println("cleanupOldEvents skipped (no DB connection)")
+		return
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -90)
 
 	result, err := db.Exec("DELETE FROM order_events WHERE created_at < $1", cutoff)
 	if err != nil {
@@ -231,6 +244,9 @@ func getEnv(key, fallback string) string {
 }
 
 func waitForDB() {
+	if db == nil {
+		return
+	}
 	for i := 0; i < 120; i++ {
 		if err := db.Ping(); err == nil {
 			return
