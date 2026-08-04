@@ -7,3 +7,18 @@ module "vpc" {
   public_subnet_cidrs = var.public_subnet_cidrs
   availability_zones  = var.availability_zones
 }
+
+terraform {
+  required_version = ">= 1.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
